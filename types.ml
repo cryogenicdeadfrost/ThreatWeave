@@ -1,70 +1,50 @@
 open Core
 
-(* 
-   HFT-grade Threat Event definitions using bin_prot for zero-allocation
-   binary serialization directly from the C network loop.
-*)
-
-module Protocol = struct
-  type t =
-    | TCP
-    | UDP
-    | ICMP
-    | HTTP
-    | DNS
+module Proto = struct
+  type t = Tcp | Udp | Icmp | Http | Dns
   [@@deriving sexp, bin_io, compare, hash]
 end
 
-(* Optimized IPv4 representation (avoiding string allocations) *)
+(* ints are cheaper than strings lol *)
 module Ipv4 = struct
   type t = int32 [@@deriving sexp, bin_io, compare, hash]
-  
-  let to_string ip = 
-    let b1 = Int32.bit_and (Int32.shift_right_logical ip 24) 255l |> Int32.to_int_exn in
-    let b2 = Int32.bit_and (Int32.shift_right_logical ip 16) 255l |> Int32.to_int_exn in
-    let b3 = Int32.bit_and (Int32.shift_right_logical ip 8) 255l |> Int32.to_int_exn in
-    let b4 = Int32.bit_and ip 255l |> Int32.to_int_exn in
-    sprintf "%d.%d.%d.%d" b1 b2 b3 b4
+  let to_str ip = 
+    let f n = Int32.bit_and (Int32.shift_right_logical ip n) 255l |> Int32.to_int_exn in
+    sprintf "%d.%d.%d.%d" (f 24) (f 16) (f 8) (f 0)
 end
 
-(* Fundamental network event layout ingested from C ring buffer *)
-type raw_event = {
-  timestamp_ns: int64;
-  src_ip: Ipv4.t;
-  dst_ip: Ipv4.t;
-  src_port: int;
-  dst_port: int;
-  protocol: Protocol.t;
-  payload_len: int;
+type packet_boi = {
+  ts: int64;
+  src: Ipv4.t;
+  dst: Ipv4.t;
+  sport: int;
+  dport: int;
+  proto: Proto.t;
+  len: int;
 } [@@deriving sexp, bin_io, compare]
 
-(* Advanced ADTs mapping raw packets to security semantics *)
-type threat_signature =
-  | Port_Scan_Attempt of { target_port: int; consecutive_failures: int }
-  | Syn_Flood
-  | Data_Exfiltration_Anomaly of { bytes_out: int; entropy_score: float }
-  | Dga_Beacon of { domain_hash: int64 }
-  | Malformed_Protocol
+type bad_vibes =
+  | Knock_Knock of { port: int; fails: int }
+  | Syn_Spam
+  | Mega_Yeet of { bytes: int; entropy: float }
+  | Dga_Sus of { hash: int64 }
+  | Wtf_Proto
   [@@deriving sexp, bin_io, compare]
 
-type parsed_event = {
-  raw: raw_event;
-  sig_match: threat_signature option;
+type sus_packet = {
+  raw: packet_boi;
+  vibe_check: bad_vibes option;
 } [@@deriving sexp, bin_io]
 
-(* 
-   GADTs for State-Machine validation at compile time.
-   Provides absolute guarantees that threats move logically through a kill-chain.
-*)
-type recon_state
-type weaponized_state
-type exfiltrating_state
+(* compiler magic to prevent stupid state bugs *)
+type snooping
+type pewpew
+type yoinking
 
-type _ kill_chain_state =
-  | Recon : raw_event list -> recon_state kill_chain_state
-  | Weaponization : recon_state kill_chain_state * event_sequence -> weaponized_state kill_chain_state
-  | Exfiltration : weaponized_state kill_chain_state * int -> exfiltrating_state kill_chain_state
-and event_sequence = parsed_event list
+type _ kill_chain =
+  | Snooping : packet_boi list -> snooping kill_chain
+  | PewPew : snooping kill_chain * sus_packet list -> pewpew kill_chain
+  | Yoinking : pewpew kill_chain * int -> yoinking kill_chain
 
-type active_threat =
-  | Threat : 'state kill_chain_state -> active_threat
+type active_baddie =
+  | Baddie : 'state kill_chain -> active_baddie

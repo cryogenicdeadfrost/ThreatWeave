@@ -1,6 +1,7 @@
 (executable
  (name main)
  (public_name threatweave)
- (libraries core async bin_prot)
+ (libraries core async bin_prot ctypes ctypes.foreign)
  (preprocess (pps ppx_jane))
+ (foreign_stubs (language c) (names sensor))
  (flags :standard -O3 (-unbox-closures) (-cross-module-opt)))

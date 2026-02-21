@@ -1,85 +1,69 @@
 open Core
 open Async
-
 module T = Types
 module E = Engine
 
-(*
-   HFT-Style Async Pipeline.
-   In a production environment, reading from the C-Ring buffer occurs here via Ctypes.
-   For this scaffolding, we simulate a massive influx of dummy events to validate pipeline speed.
-*)
-
-let generate_mock_event () =
+let gen_trash () =
   {
-    T.timestamp_ns = Time_ns.(now () |> to_int63_ns_since_epoch |> Int63.to_int64);
-    src_ip = Random.int32 Int32.max_value;
-    dst_ip = Random.int32 Int32.max_value;
-    src_port = Random.int 65535;
-    dst_port = Random.int 65535;
-    protocol = T.Protocol.TCP;
-    payload_len = Random.int 1500;
+    T.ts = Time_ns.(now () |> to_int63_ns_since_epoch |> Int63.to_int64);
+    src = Random.int32 Int32.max_value;
+    dst = Random.int32 Int32.max_value;
+    sport = Random.int 65535;
+    dport = Random.int 65535;
+    proto = T.Proto.Tcp;
+    len = Random.int 1500;
   }
 
-let simulate_ingestion (writer : T.raw_event Pipe.Writer.t) =
-  let rec loop count =
-    if count = 0 then (
-      Pipe.close writer;
-      return ()
-    ) else (
-      (* Pumping 200k events *)
-      Pipe.write_without_pushback_if_open writer (generate_mock_event ());
-      if count % 1000 = 0 then
+let firehose writer =
+  let rec loop n =
+    if n = 0 then (Pipe.close writer; return ())
+    else (
+      Pipe.write_without_pushback_if_open writer (gen_trash ());
+      if n % 1000 = 0 then
         let%bind () = Scheduler.yield () in
-        loop (count - 1)
-      else
-        loop (count - 1)
+        loop (n - 1)
+      else loop (n - 1)
     )
-  in
-  loop 200_000
+  in loop 200_000
 
-let process_pipeline (reader : T.raw_event Pipe.Reader.t) =
-  let threat_states = Hashtbl.create (module T.Ipv4) in
-  
-  let processor_loop () =
-    Pipe.iter reader ~f:(fun raw_event ->
-      let parsed = E.analyze_packet raw_event in
-      
-      let current_state = Hashtbl.find threat_states raw_event.src_ip in
-      let next_state = E.correlate_threats parsed current_state in
-      
-      (match next_state with
-       | Some state -> Hashtbl.set threat_states ~key:raw_event.src_ip ~data:state
+let brain reader ch_writer =
+  let baddies = Hashtbl.create (module T.Ipv4) in
+  let work () =
+    Pipe.iter reader ~f:(fun pkt ->
+      let vibes = E.vibe_check pkt in
+      let curr = Hashtbl.find baddies pkt.src in
+      let next = E.do_math vibes curr in
+      (match next with
+       | Some b -> 
+           Hashtbl.set baddies ~key:pkt.src ~data:b;
+           Pipe.write_without_pushback_if_open ch_writer vibes
        | None -> ());
-       
       return ()
     )
   in
-  
-  let start_time = Time_now.nanoseconds_since_start_of_day () in
-  let%bind () = processor_loop () in
-  let end_time = Time_now.nanoseconds_since_start_of_day () in
-  let diff_ms = Int63.((end_time - start_time) / of_int 1_000_000) |> Int63.to_int_exn in
-  
-  printf "[ThreatWeave] Processed 200,000 events in %d ms.\n" diff_ms;
-  printf "[ThreatWeave] Active tracked threats: %d\n" (Hashtbl.length threat_states);
+  let t0 = Time_now.nanoseconds_since_start_of_day () in
+  let%bind () = work () in
+  let t1 = Time_now.nanoseconds_since_start_of_day () in
+  let ms = Int63.((t1 - t0) / of_int 1_000_000) |> Int63.to_int_exn in
+  printf "ate 200k packets in %d ms.\n" ms;
+  printf "found %d baddies\n" (Hashtbl.length baddies);
   return ()
 
-let main () =
-  let (reader, writer) = Pipe.create () in
+let run () =
+  let (r, w) = Pipe.create () in
+  let (ch_r, ch_w) = Pipe.create () in
   
-  printf "[ThreatWeave] Booting Real-Time Correlation Engine...\n";
+  printf "summoning the engine...\n";
+  let _ = Ffi.init_bpf () in
+  don't_wait_for (firehose w);
+  don't_wait_for (Clickhouse.yeet_loop ch_r);
   
-  (* Launch ingestion and processing in parallel *)
-  don't_wait_for (simulate_ingestion writer);
-  
-  let%bind () = process_pipeline reader in
-  
-  printf "[ThreatWeave] Graceful shutdown.\n";
+  let%bind () = brain r ch_w in
+  printf "imma head out\n";
   Shutdown.exit 0
 
 let () =
   Command.async
-    ~summary:"Start the ThreatWeave correlation engine"
-    (Command.Param.return main)
+    ~summary:"run the thing"
+    (Command.Param.return run)
   |> Command_unix.run
